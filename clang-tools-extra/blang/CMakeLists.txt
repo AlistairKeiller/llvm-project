@@ -7,7 +7,7 @@ add_clang_executable(blang
   Blang.cpp
   )
 
-clang_target_link_libraries(tool-template
+clang_target_link_libraries(blang
   PRIVATE
   clangAST
   clangASTMatchers
