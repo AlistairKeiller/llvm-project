@@ -55,6 +55,7 @@ public:
     target.addLegalOp<tosa::IfOp>();
     target.addLegalOp<tosa::ConstOp>();
     target.addLegalOp<tosa::WhileOp>();
+    target.addLegalOp<tosa::ConcatOp>();
     target.addLegalOp<tosa::SliceOp>();
     target.addLegalOp<tosa::ReshapeOp>();
     target.addLegalOp<tosa::PadOp>();
@@ -80,6 +81,7 @@ void mlir::tosa::addTosaToLinalgPasses(OpPassManager &pm,
     pm.addNestedPass<func::FuncOp>(tosa::createTosaOptionalDecompositions());
   pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
 
+  pm.addNestedPass<func::FuncOp>(tosa::createTosaInferShapesPass());
   pm.addNestedPass<func::FuncOp>(tosa::createTosaMakeBroadcastablePass());
   pm.addNestedPass<func::FuncOp>(tosa::createTosaToLinalgNamed());
   pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());

@@ -59,6 +59,7 @@ set(FLANG_TEST_DEPENDS
   bbc
   llvm-dis
   llvm-objdump
+  llvm-readobj
   split-file
   FortranRuntime
   Fortran_main
@@ -78,6 +79,7 @@ if (LLVM_BUILD_EXAMPLES)
   list(APPEND FLANG_TEST_DEPENDS
     flangPrintFunctionNames
     flangOmpReport
+    flangFeatureList
     )
 endif ()
 

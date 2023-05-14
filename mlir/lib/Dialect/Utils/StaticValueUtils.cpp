@@ -10,6 +10,7 @@
 #include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/Support/LLVM.h"
+#include "mlir/Support/MathExtras.h"
 #include "llvm/ADT/APSInt.h"
 
 namespace mlir {
@@ -18,7 +19,7 @@ bool isZeroIndex(OpFoldResult v) {
   if (!v)
     return false;
   if (auto attr = v.dyn_cast<Attribute>()) {
-    IntegerAttr intAttr = attr.dyn_cast<IntegerAttr>();
+    IntegerAttr intAttr = dyn_cast<IntegerAttr>(attr);
     return intAttr && intAttr.getValue().isZero();
   }
   if (auto cst = v.get<Value>().getDefiningOp<arith::ConstantIndexOp>())
@@ -52,7 +53,7 @@ void dispatchIndexOpFoldResult(OpFoldResult ofr,
                                SmallVectorImpl<int64_t> &staticVec) {
   auto v = ofr.dyn_cast<Value>();
   if (!v) {
-    APInt apInt = ofr.get<Attribute>().cast<IntegerAttr>().getValue();
+    APInt apInt = cast<IntegerAttr>(ofr.get<Attribute>()).getValue();
     staticVec.push_back(apInt.getSExtValue());
     return;
   }
@@ -70,8 +71,8 @@ void dispatchIndexOpFoldResults(ArrayRef<OpFoldResult> ofrs,
 /// Extract int64_t values from the assumed ArrayAttr of IntegerAttr.
 SmallVector<int64_t, 4> extractFromI64ArrayAttr(Attribute attr) {
   return llvm::to_vector<4>(
-      llvm::map_range(attr.cast<ArrayAttr>(), [](Attribute a) -> int64_t {
-        return a.cast<IntegerAttr>().getInt();
+      llvm::map_range(cast<ArrayAttr>(attr), [](Attribute a) -> int64_t {
+        return cast<IntegerAttr>(a).getInt();
       }));
 }
 
@@ -123,7 +124,7 @@ std::optional<int64_t> getConstantIntValue(OpFoldResult ofr) {
   }
   // Case 2: Check for IntegerAttr.
   Attribute attr = ofr.dyn_cast<Attribute>();
-  if (auto intAttr = attr.dyn_cast_or_null<IntegerAttr>())
+  if (auto intAttr = dyn_cast_or_null<IntegerAttr>(attr))
     return intAttr.getValue().getSExtValue();
   return std::nullopt;
 }
@@ -183,7 +184,7 @@ decomposeMixedValues(Builder &b,
   SmallVector<Value> dynamicValues;
   for (const auto &it : mixedValues) {
     if (it.is<Attribute>()) {
-      staticValues.push_back(it.get<Attribute>().cast<IntegerAttr>().getInt());
+      staticValues.push_back(cast<IntegerAttr>(it.get<Attribute>()).getInt());
     } else {
       staticValues.push_back(ShapedType::kDynamic);
       dynamicValues.push_back(it.get<Value>());
@@ -226,6 +227,26 @@ SmallVector<int64_t>
 getValuesSortedByKey(ArrayRef<Attribute> keys, ArrayRef<int64_t> values,
                      llvm::function_ref<bool(Attribute, Attribute)> compare) {
   return getValuesSortedByKeyImpl(keys, values, compare);
+}
+
+/// Return the number of iterations for a loop with a lower bound `lb`, upper
+/// bound `ub` and step `step`.
+std::optional<int64_t> constantTripCount(OpFoldResult lb, OpFoldResult ub,
+                                         OpFoldResult step) {
+  if (lb == ub)
+    return 0;
+
+  std::optional<int64_t> lbConstant = getConstantIntValue(lb);
+  if (!lbConstant)
+    return std::nullopt;
+  std::optional<int64_t> ubConstant = getConstantIntValue(ub);
+  if (!ubConstant)
+    return std::nullopt;
+  std::optional<int64_t> stepConstant = getConstantIntValue(step);
+  if (!stepConstant)
+    return std::nullopt;
+
+  return mlir::ceilDiv(*ubConstant - *lbConstant, *stepConstant);
 }
 
 } // namespace mlir

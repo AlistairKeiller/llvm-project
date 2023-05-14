@@ -33,6 +33,7 @@
 #include "llvm/IR/Type.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TargetParser/RISCVTargetParser.h"
 #include "llvm/TargetParser/Triple.h"
 #include <algorithm>
 
@@ -236,6 +237,10 @@ const CodeGenOptions &ABIInfo::getCodeGenOpts() const {
 
 bool ABIInfo::isAndroid() const { return getTarget().getTriple().isAndroid(); }
 
+bool ABIInfo::isOHOSFamily() const {
+  return getTarget().getTriple().isOHOSFamily();
+}
+
 bool ABIInfo::isHomogeneousAggregateBaseType(QualType Ty) const {
   return false;
 }
@@ -295,17 +300,13 @@ LLVM_DUMP_METHOD void ABIArgInfo::dump() const {
 static llvm::Value *emitRoundPointerUpToAlignment(CodeGenFunction &CGF,
                                                   llvm::Value *Ptr,
                                                   CharUnits Align) {
-  llvm::Value *PtrAsInt = Ptr;
   // OverflowArgArea = (OverflowArgArea + Align - 1) & -Align;
-  PtrAsInt = CGF.Builder.CreatePtrToInt(PtrAsInt, CGF.IntPtrTy);
-  PtrAsInt = CGF.Builder.CreateAdd(PtrAsInt,
-        llvm::ConstantInt::get(CGF.IntPtrTy, Align.getQuantity() - 1));
-  PtrAsInt = CGF.Builder.CreateAnd(PtrAsInt,
-           llvm::ConstantInt::get(CGF.IntPtrTy, -Align.getQuantity()));
-  PtrAsInt = CGF.Builder.CreateIntToPtr(PtrAsInt,
-                                        Ptr->getType(),
-                                        Ptr->getName() + ".aligned");
-  return PtrAsInt;
+  llvm::Value *RoundUp = CGF.Builder.CreateConstInBoundsGEP1_32(
+      CGF.Builder.getInt8Ty(), Ptr, Align.getQuantity() - 1);
+  return CGF.Builder.CreateIntrinsic(
+      llvm::Intrinsic::ptrmask, {CGF.AllocaInt8PtrTy, CGF.IntPtrTy},
+      {RoundUp, llvm::ConstantInt::get(CGF.IntPtrTy, -Align.getQuantity())},
+      nullptr, Ptr->getName() + ".aligned");
 }
 
 /// Emit va_arg for a platform using the common void* representation,
@@ -467,7 +468,7 @@ unsigned TargetCodeGenInfo::getSizeOfUnwindException() const {
   // Verified for:
   //   x86-64     FreeBSD, Linux, Darwin
   //   x86-32     FreeBSD, Linux, Darwin
-  //   PowerPC    Linux, Darwin
+  //   PowerPC    Linux
   //   ARM        Darwin (*not* EABI)
   //   AArch64    Linux
   return 32;
@@ -903,6 +904,10 @@ public:
   /// Return the WebAssembly externref reference type.
   virtual llvm::Type *getWasmExternrefReferenceType() const override {
     return llvm::Type::getWasm_ExternrefTy(getABIInfo().getVMContext());
+  }
+  /// Return the WebAssembly funcref reference type.
+  virtual llvm::Type *getWasmFuncrefReferenceType() const override {
+    return llvm::Type::getWasm_FuncrefTy(getABIInfo().getVMContext());
   }
 };
 
@@ -5733,7 +5738,7 @@ ABIArgInfo AArch64ABIInfo::coerceIllegalVector(QualType Ty) const {
 
   uint64_t Size = getContext().getTypeSize(Ty);
   // Android promotes <2 x i8> to i16, not i32
-  if (isAndroid() && (Size <= 16)) {
+  if ((isAndroid() || isOHOSFamily()) && (Size <= 16)) {
     llvm::Type *ResType = llvm::Type::getInt16Ty(getVMContext());
     return ABIArgInfo::getDirect(ResType);
   }
@@ -6340,7 +6345,7 @@ public:
     case llvm::Triple::MuslEABIHF:
       return true;
     default:
-      return false;
+      return getTarget().getTriple().isOHOSFamily();
     }
   }
 
@@ -7369,6 +7374,11 @@ void NVPTXTargetCodeGenInfo::setTargetAttributes(
       }
     }
   }
+
+  // Attach kernel metadata directly if compiling for NVPTX.
+  if (FD->hasAttr<NVPTXKernelAttr>()) {
+    addNVVMMetadata(F, "kernel", 1);
+  }
 }
 
 void NVPTXTargetCodeGenInfo::addNVVMMetadata(llvm::GlobalValue *GV,
@@ -7907,7 +7917,7 @@ bool SystemZTargetCodeGenInfo::isVectorTypeBased(const Type *Ty,
     if (isVectorTypeBased(FT->getReturnType().getTypePtr(), /*IsParam*/true))
       return true;
   if (const FunctionProtoType *Proto = Ty->getAs<FunctionProtoType>())
-    for (auto ParamType : Proto->getParamTypes())
+    for (const auto &ParamType : Proto->getParamTypes())
       if (isVectorTypeBased(ParamType.getTypePtr(), /*IsParam*/true))
         return true;
 
@@ -9465,6 +9475,7 @@ public:
                                          llvm::Function *BlockInvokeFunc,
                                          llvm::Type *BlockTy) const override;
   bool shouldEmitStaticExternCAliases() const override;
+  bool shouldEmitDWARFBitFieldSeparators() const override;
   void setCUDAKernelCallingConvention(const FunctionType *&FT) const override;
 };
 }
@@ -9578,12 +9589,9 @@ void AMDGPUTargetCodeGenInfo::setTargetAttributes(
 
   const bool IsHIPKernel =
       M.getLangOpts().HIP && FD && FD->hasAttr<CUDAGlobalAttr>();
-  const bool IsOpenMPkernel =
-      M.getLangOpts().OpenMPIsDevice &&
-      (F->getCallingConv() == llvm::CallingConv::AMDGPU_KERNEL);
 
   // TODO: This should be moved to language specific attributes instead.
-  if (IsHIPKernel || IsOpenMPkernel)
+  if (IsHIPKernel)
     F->addFnAttr("uniform-work-group-size", "true");
 
   if (M.getContext().getTargetInfo().allowAMDGPUUnsafeFPAtomics())
@@ -9632,7 +9640,7 @@ AMDGPUTargetCodeGenInfo::getGlobalVarAddressSpace(CodeGenModule &CGM,
     return AddrSpace;
 
   // Only promote to address space 4 if VarDecl has constant initialization.
-  if (CGM.isTypeConstant(D->getType(), false) &&
+  if (CGM.isTypeConstant(D->getType(), false, false) &&
       D->hasConstantInitialization()) {
     if (auto ConstAS = CGM.getTarget().getConstantAddressSpace())
       return *ConstAS;
@@ -9680,6 +9688,10 @@ AMDGPUTargetCodeGenInfo::getLLVMSyncScopeID(const LangOptions &LangOpts,
 
 bool AMDGPUTargetCodeGenInfo::shouldEmitStaticExternCAliases() const {
   return false;
+}
+
+bool AMDGPUTargetCodeGenInfo::shouldEmitDWARFBitFieldSeparators() const {
+  return true;
 }
 
 void AMDGPUTargetCodeGenInfo::setCUDAKernelCallingConvention(
@@ -11049,7 +11061,7 @@ llvm::Type *CommonSPIRTargetCodeGenInfo::getOpenCLType(CodeGenModule &CGM,
   return nullptr;
 }
 //===----------------------------------------------------------------------===//
-// RISCV ABI Implementation
+// RISC-V ABI Implementation
 //===----------------------------------------------------------------------===//
 
 namespace {
@@ -11094,6 +11106,8 @@ public:
                                                CharUnits Field1Off,
                                                llvm::Type *Field2Ty,
                                                CharUnits Field2Off) const;
+
+  ABIArgInfo coerceVLSVector(QualType Ty) const;
 };
 } // end anonymous namespace
 
@@ -11148,10 +11162,9 @@ bool RISCVABIInfo::detectFPCCEligibleStructHelper(QualType Ty, CharUnits CurOff,
     uint64_t Size = getContext().getTypeSize(Ty);
     if (IsInt && Size > XLen)
       return false;
-    // Can't be eligible if larger than the FP registers. Half precision isn't
-    // currently supported on RISC-V and the ABI hasn't been confirmed, so
-    // default to the integer ABI in that case.
-    if (IsFloat && (Size > FLen || Size < 32))
+    // Can't be eligible if larger than the FP registers. Handling of half
+    // precision values has been specified in the ABI, so don't block those.
+    if (IsFloat && Size > FLen)
       return false;
     // Can't be eligible if an integer type was already found (int+int pairs
     // are not eligible).
@@ -11338,6 +11351,25 @@ ABIArgInfo RISCVABIInfo::coerceAndExpandFPCCEligibleStruct(
   return ABIArgInfo::getCoerceAndExpand(CoerceToType, UnpaddedCoerceToType);
 }
 
+// Fixed-length RVV vectors are represented as scalable vectors in function
+// args/return and must be coerced from fixed vectors.
+ABIArgInfo RISCVABIInfo::coerceVLSVector(QualType Ty) const {
+  assert(Ty->isVectorType() && "expected vector type!");
+
+  const auto *VT = Ty->castAs<VectorType>();
+  assert(VT->getVectorKind() == VectorType::RVVFixedLengthDataVector &&
+         "Unexpected vector kind");
+
+  assert(VT->getElementType()->isBuiltinType() && "expected builtin type!");
+
+  const auto *BT = VT->getElementType()->castAs<BuiltinType>();
+  unsigned EltSize = getContext().getTypeSize(BT);
+  llvm::ScalableVectorType *ResType =
+        llvm::ScalableVectorType::get(CGT.ConvertType(VT->getElementType()),
+                                      llvm::RISCV::RVVBitsPerBlock / EltSize);
+  return ABIArgInfo::getDirect(ResType);
+}
+
 ABIArgInfo RISCVABIInfo::classifyArgumentType(QualType Ty, bool IsFixed,
                                               int &ArgGPRsLeft,
                                               int &ArgFPRsLeft) const {
@@ -11433,6 +11465,10 @@ ABIArgInfo RISCVABIInfo::classifyArgumentType(QualType Ty, bool IsFixed,
     return ABIArgInfo::getDirect();
   }
 
+  if (const VectorType *VT = Ty->getAs<VectorType>())
+    if (VT->getVectorKind() == VectorType::RVVFixedLengthDataVector)
+      return coerceVLSVector(Ty);
+
   // Aggregates which are <= 2*XLen will be passed in registers if possible,
   // so coerce to integers.
   if (Size <= 2 * XLen) {
@@ -11514,7 +11550,6 @@ public:
 
     const char *Kind;
     switch (Attr->getInterrupt()) {
-    case RISCVInterruptAttr::user: Kind = "user"; break;
     case RISCVInterruptAttr::supervisor: Kind = "supervisor"; break;
     case RISCVInterruptAttr::machine: Kind = "machine"; break;
     }

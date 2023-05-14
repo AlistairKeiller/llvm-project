@@ -278,11 +278,10 @@ public:
   /// Show frontend performance metrics and statistics.
   unsigned ShowStats : 1;
 
+  unsigned AppendStats : 1;
+
   /// print the supported cpus for the current target
   unsigned PrintSupportedCPUs : 1;
-
-  /// Output time trace profile.
-  unsigned TimeTrace : 1;
 
   /// Show the -version text.
   unsigned ShowVersion : 1;
@@ -511,7 +510,7 @@ public:
 public:
   FrontendOptions()
       : DisableFree(false), RelocatablePCH(false), ShowHelp(false),
-        ShowStats(false), TimeTrace(false), ShowVersion(false),
+        ShowStats(false), AppendStats(false), ShowVersion(false),
         FixWhatYouCan(false), FixOnlyWarnings(false), FixAndRecompile(false),
         FixToTemporaries(false), ARCMTMigrateEmitARCErrors(false),
         SkipFunctionBodies(false), UseGlobalModuleIndex(true),

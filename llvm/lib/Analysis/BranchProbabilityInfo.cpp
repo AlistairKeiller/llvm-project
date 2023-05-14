@@ -1175,6 +1175,14 @@ void BranchProbabilityInfo::copyEdgeProbabilities(BasicBlock *Src,
   }
 }
 
+void BranchProbabilityInfo::swapSuccEdgesProbabilities(const BasicBlock *Src) {
+  assert(Src->getTerminator()->getNumSuccessors() == 2);
+  if (!Probs.contains(std::make_pair(Src, 0)))
+    return; // No probability is set for edges from Src
+  assert(Probs.contains(std::make_pair(Src, 1)));
+  std::swap(Probs[std::make_pair(Src, 0)], Probs[std::make_pair(Src, 1)]);
+}
+
 raw_ostream &
 BranchProbabilityInfo::printEdgeProbability(raw_ostream &OS,
                                             const BasicBlock *Src,
@@ -1303,11 +1311,12 @@ void BranchProbabilityInfoWrapperPass::print(raw_ostream &OS,
 AnalysisKey BranchProbabilityAnalysis::Key;
 BranchProbabilityInfo
 BranchProbabilityAnalysis::run(Function &F, FunctionAnalysisManager &AM) {
+  auto &LI = AM.getResult<LoopAnalysis>(F);
+  auto &TLI = AM.getResult<TargetLibraryAnalysis>(F);
+  auto &DT = AM.getResult<DominatorTreeAnalysis>(F);
+  auto &PDT = AM.getResult<PostDominatorTreeAnalysis>(F);
   BranchProbabilityInfo BPI;
-  BPI.calculate(F, AM.getResult<LoopAnalysis>(F),
-                &AM.getResult<TargetLibraryAnalysis>(F),
-                &AM.getResult<DominatorTreeAnalysis>(F),
-                &AM.getResult<PostDominatorTreeAnalysis>(F));
+  BPI.calculate(F, LI, &TLI, &DT, &PDT);
   return BPI;
 }
 

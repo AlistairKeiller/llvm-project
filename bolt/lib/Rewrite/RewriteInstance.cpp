@@ -34,6 +34,7 @@
 #include "llvm/DebugInfo/DWARF/DWARFContext.h"
 #include "llvm/DebugInfo/DWARF/DWARFDebugFrame.h"
 #include "llvm/ExecutionEngine/RuntimeDyld.h"
+#include "llvm/IR/Function.h"
 #include "llvm/MC/MCAsmBackend.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCAsmLayout.h"
@@ -305,6 +306,8 @@ MCPlusBuilder *createMCPlusBuilder(const Triple::ArchType Arch,
 } // namespace bolt
 } // namespace llvm
 
+using ELF64LEPhdrTy = ELF64LEFile::Elf_Phdr;
+
 namespace {
 
 bool refersToReorderedSection(ErrorOr<BinarySection &> Section) {
@@ -411,7 +414,7 @@ Error RewriteInstance::discoverStorage() {
   NamedRegionTimer T("discoverStorage", "discover storage", TimerGroupName,
                      TimerGroupDesc, opts::TimeRewrite);
 
-  auto ELF64LEFile = dyn_cast<ELF64LEObjectFile>(InputFile);
+  auto ELF64LEFile = cast<ELF64LEObjectFile>(InputFile);
   const ELFFile<ELF64LE> &Obj = ELF64LEFile->getELFFile();
 
   BC->StartFunctionAddress = Obj.getHeader().e_entry;
@@ -1049,6 +1052,16 @@ void RewriteInstance::discoverFileObjects() {
 
     LLVM_DEBUG(dbgs() << "BOLT-DEBUG: considering symbol " << UniqueName
                       << " for function\n");
+
+    if (Address == Section->getAddress() + Section->getSize()) {
+      assert(SymbolSize == 0 &&
+             "unexpect non-zero sized symbol at end of section");
+      LLVM_DEBUG(
+          dbgs()
+          << "BOLT-DEBUG: rejecting as symbol points to end of its section\n");
+      registerName(SymbolSize);
+      continue;
+    }
 
     if (!Section->isText()) {
       assert(SymbolType != SymbolRef::ST_Function &&
@@ -1907,14 +1920,7 @@ int64_t getRelocationAddend(const ELFObjectFile<ELFT> *Obj,
 
 int64_t getRelocationAddend(const ELFObjectFileBase *Obj,
                             const RelocationRef &Rel) {
-  if (auto *ELF32LE = dyn_cast<ELF32LEObjectFile>(Obj))
-    return getRelocationAddend(ELF32LE, Rel);
-  if (auto *ELF64LE = dyn_cast<ELF64LEObjectFile>(Obj))
-    return getRelocationAddend(ELF64LE, Rel);
-  if (auto *ELF32BE = dyn_cast<ELF32BEObjectFile>(Obj))
-    return getRelocationAddend(ELF32BE, Rel);
-  auto *ELF64BE = cast<ELF64BEObjectFile>(Obj);
-  return getRelocationAddend(ELF64BE, Rel);
+  return getRelocationAddend(cast<ELF64LEObjectFile>(Obj), Rel);
 }
 
 template <typename ELFT>
@@ -1941,14 +1947,7 @@ uint32_t getRelocationSymbol(const ELFObjectFile<ELFT> *Obj,
 
 uint32_t getRelocationSymbol(const ELFObjectFileBase *Obj,
                              const RelocationRef &Rel) {
-  if (auto *ELF32LE = dyn_cast<ELF32LEObjectFile>(Obj))
-    return getRelocationSymbol(ELF32LE, Rel);
-  if (auto *ELF64LE = dyn_cast<ELF64LEObjectFile>(Obj))
-    return getRelocationSymbol(ELF64LE, Rel);
-  if (auto *ELF32BE = dyn_cast<ELF32BEObjectFile>(Obj))
-    return getRelocationSymbol(ELF32BE, Rel);
-  auto *ELF64BE = cast<ELF64BEObjectFile>(Obj);
-  return getRelocationSymbol(ELF64BE, Rel);
+  return getRelocationSymbol(cast<ELF64LEObjectFile>(Obj), Rel);
 }
 } // anonymous namespace
 
@@ -2074,6 +2073,19 @@ bool RewriteInstance::analyzeRelocation(
 }
 
 void RewriteInstance::processDynamicRelocations() {
+  // Read .relr.dyn section containing compressed R_*_RELATIVE relocations.
+  if (DynamicRelrSize > 0) {
+    ErrorOr<BinarySection &> DynamicRelrSectionOrErr =
+        BC->getSectionForAddress(*DynamicRelrAddress);
+    if (!DynamicRelrSectionOrErr)
+      report_error("unable to find section corresponding to DT_RELR",
+                   DynamicRelrSectionOrErr.getError());
+    if (DynamicRelrSectionOrErr->getSize() != DynamicRelrSize)
+      report_error("section size mismatch for DT_RELRSZ",
+                   errc::executable_format_error);
+    readDynamicRelrRelocations(*DynamicRelrSectionOrErr);
+  }
+
   // Read relocations for PLT - DT_JMPREL.
   if (PLTRelocationsSize > 0) {
     ErrorOr<BinarySection &> PLTRelSectionOrErr =
@@ -2369,6 +2381,60 @@ void RewriteInstance::readDynamicRelocations(const SectionRef &Section,
       SymbolIndex[Symbol] = getRelocationSymbol(InputFile, Rel);
 
     BC->addDynamicRelocation(Rel.getOffset(), Symbol, RType, Addend);
+  }
+}
+
+void RewriteInstance::readDynamicRelrRelocations(BinarySection &Section) {
+  assert(Section.isAllocatable() && "allocatable expected");
+
+  LLVM_DEBUG({
+    StringRef SectionName = Section.getName();
+    dbgs() << "BOLT-DEBUG: reading relocations in section " << SectionName
+           << ":\n";
+  });
+
+  const uint64_t RType = Relocation::getRelative();
+  const uint8_t PSize = BC->AsmInfo->getCodePointerSize();
+  const uint64_t MaxDelta = ((CHAR_BIT * DynamicRelrEntrySize) - 1) * PSize;
+
+  auto ExtractAddendValue = [&](uint64_t Address) -> uint64_t {
+    ErrorOr<BinarySection &> Section = BC->getSectionForAddress(Address);
+    assert(Section && "cannot get section for data address from RELR");
+    DataExtractor DE = DataExtractor(Section->getContents(),
+                                     BC->AsmInfo->isLittleEndian(), PSize);
+    uint64_t Offset = Address - Section->getAddress();
+    return DE.getUnsigned(&Offset, PSize);
+  };
+
+  auto AddRelocation = [&](uint64_t Address) {
+    uint64_t Addend = ExtractAddendValue(Address);
+    LLVM_DEBUG(dbgs() << "BOLT-DEBUG: R_*_RELATIVE relocation at 0x"
+                      << Twine::utohexstr(Address) << " to 0x"
+                      << Twine::utohexstr(Addend) << '\n';);
+    BC->addDynamicRelocation(Address, nullptr, RType, Addend);
+  };
+
+  DataExtractor DE = DataExtractor(Section.getContents(),
+                                   BC->AsmInfo->isLittleEndian(), PSize);
+  uint64_t Offset = 0, Address = 0;
+  uint64_t RelrCount = DynamicRelrSize / DynamicRelrEntrySize;
+  while (RelrCount--) {
+    assert(DE.isValidOffset(Offset));
+    uint64_t Entry = DE.getUnsigned(&Offset, DynamicRelrEntrySize);
+    if ((Entry & 1) == 0) {
+      AddRelocation(Entry);
+      Address = Entry + PSize;
+    } else {
+      const uint64_t StartAddress = Address;
+      while (Entry >>= 1) {
+        if (Entry & 1)
+          AddRelocation(Address);
+
+        Address += PSize;
+      }
+
+      Address = StartAddress + MaxDelta;
+    }
   }
 }
 
@@ -4020,7 +4086,6 @@ void RewriteInstance::mapCodeSections(RuntimeDyld &RTDyld) {
       FF.setImageAddress(0);
       FF.setImageSize(0);
       FF.setFileOffset(0);
-      BC->deregisterSection(*ColdSection);
     } else {
       FF.setAddress(NextAvailableAddress);
       FF.setImageAddress(ColdSection->getAllocAddress());
@@ -4034,6 +4099,9 @@ void RewriteInstance::mapCodeSections(RuntimeDyld &RTDyld) {
             "BOLT: mapping cold fragment {0:x+} to {1:x+} with size {2:x+}\n",
             FF.getImageAddress(), FF.getAddress(), FF.getImageSize()));
     RTDyld.reassignSectionAddress(ColdSection->getSectionID(), FF.getAddress());
+
+    if (TooLarge)
+      BC->deregisterSection(*ColdSection);
 
     NextAvailableAddress += FF.getImageSize();
   }
@@ -4141,11 +4209,7 @@ void RewriteInstance::updateOutputValues(const MCAsmLayout &Layout) {
 }
 
 void RewriteInstance::patchELFPHDRTable() {
-  auto ELF64LEFile = dyn_cast<ELF64LEObjectFile>(InputFile);
-  if (!ELF64LEFile) {
-    errs() << "BOLT-ERROR: only 64-bit LE ELF binaries are supported\n";
-    exit(1);
-  }
+  auto ELF64LEFile = cast<ELF64LEObjectFile>(InputFile);
   const ELFFile<ELF64LE> &Obj = ELF64LEFile->getELFFile();
   raw_fd_ostream &OS = Out->os();
 
@@ -4294,11 +4358,7 @@ uint64_t appendPadding(raw_pwrite_stream &OS, uint64_t Offset,
 }
 
 void RewriteInstance::rewriteNoteSections() {
-  auto ELF64LEFile = dyn_cast<ELF64LEObjectFile>(InputFile);
-  if (!ELF64LEFile) {
-    errs() << "BOLT-ERROR: only 64-bit LE ELF binaries are supported\n";
-    exit(1);
-  }
+  auto ELF64LEFile = cast<ELF64LEObjectFile>(InputFile);
   const ELFFile<ELF64LE> &Obj = ELF64LEFile->getELFFile();
   raw_fd_ostream &OS = Out->os();
 
@@ -4686,9 +4746,10 @@ void RewriteInstance::patchELFSectionHeaderTable(ELFObjectFile<ELFT> *File) {
       dbgs() << "  " << I << " -> " << NewSectionIndex[I] << '\n';
   );
 
-  // Align starting address for section header table.
+  // Align starting address for section header table. There's no architecutal
+  // need to align this, it is just for pleasant human readability.
   uint64_t SHTOffset = OS.tell();
-  SHTOffset = appendPadding(OS, SHTOffset, sizeof(ELFShdrTy));
+  SHTOffset = appendPadding(OS, SHTOffset, 16);
 
   // Write all section header entries while patching section references.
   for (ELFShdrTy &Section : OutputSections) {
@@ -5204,6 +5265,101 @@ void RewriteInstance::patchELFSymTabs(ELFObjectFile<ELFT> *File) {
 }
 
 template <typename ELFT>
+void RewriteInstance::patchELFAllocatableRelrSection(
+    ELFObjectFile<ELFT> *File) {
+  if (!DynamicRelrAddress)
+    return;
+
+  raw_fd_ostream &OS = Out->os();
+  const uint8_t PSize = BC->AsmInfo->getCodePointerSize();
+  const uint64_t MaxDelta = ((CHAR_BIT * DynamicRelrEntrySize) - 1) * PSize;
+
+  auto FixAddend = [&](const BinarySection &Section, const Relocation &Rel) {
+    // Fix relocation symbol value in place if no static relocation found
+    // on the same address
+    if (Section.getRelocationAt(Rel.Offset))
+      return;
+
+    // No fixup needed if symbol address was not changed
+    const uint64_t Addend = getNewFunctionOrDataAddress(Rel.Addend);
+    if (!Addend)
+      return;
+
+    uint64_t FileOffset = Section.getOutputFileOffset();
+    if (!FileOffset)
+      FileOffset = Section.getInputFileOffset();
+
+    FileOffset += Rel.Offset;
+    OS.pwrite(reinterpret_cast<const char *>(&Addend), PSize, FileOffset);
+  };
+
+  // Fill new relative relocation offsets set
+  std::set<uint64_t> RelOffsets;
+  for (const BinarySection &Section : BC->allocatableSections()) {
+    const uint64_t SectionInputAddress = Section.getAddress();
+    uint64_t SectionAddress = Section.getOutputAddress();
+    if (!SectionAddress)
+      SectionAddress = SectionInputAddress;
+
+    for (const Relocation &Rel : Section.dynamicRelocations()) {
+      if (!Rel.isRelative())
+        continue;
+
+      uint64_t RelOffset =
+          getNewFunctionOrDataAddress(SectionInputAddress + Rel.Offset);
+
+      RelOffset = RelOffset == 0 ? SectionAddress + Rel.Offset : RelOffset;
+      assert((RelOffset & 1) == 0 && "Wrong relocation offset");
+      RelOffsets.emplace(RelOffset);
+      FixAddend(Section, Rel);
+    }
+  }
+
+  ErrorOr<BinarySection &> Section =
+      BC->getSectionForAddress(*DynamicRelrAddress);
+  assert(Section && "cannot get .relr.dyn section");
+  assert(Section->isRelr() && "Expected section to be SHT_RELR type");
+  uint64_t RelrDynOffset = Section->getInputFileOffset();
+  const uint64_t RelrDynEndOffset = RelrDynOffset + Section->getSize();
+
+  auto WriteRelr = [&](uint64_t Value) {
+    if (RelrDynOffset + DynamicRelrEntrySize > RelrDynEndOffset) {
+      errs() << "BOLT-ERROR: Offset overflow for relr.dyn section\n";
+      exit(1);
+    }
+
+    OS.pwrite(reinterpret_cast<const char *>(&Value), DynamicRelrEntrySize,
+              RelrDynOffset);
+    RelrDynOffset += DynamicRelrEntrySize;
+  };
+
+  for (auto RelIt = RelOffsets.begin(); RelIt != RelOffsets.end();) {
+    WriteRelr(*RelIt);
+    uint64_t Base = *RelIt++ + PSize;
+    while (1) {
+      uint64_t Bitmap = 0;
+      for (; RelIt != RelOffsets.end(); ++RelIt) {
+        const uint64_t Delta = *RelIt - Base;
+        if (Delta >= MaxDelta || Delta % PSize)
+          break;
+
+        Bitmap |= (1ULL << (Delta / PSize));
+      }
+
+      if (!Bitmap)
+        break;
+
+      WriteRelr((Bitmap << 1) | 1);
+      Base += MaxDelta;
+    }
+  }
+
+  // Fill the rest of the section with empty bitmap value
+  while (RelrDynOffset != RelrDynEndOffset)
+    WriteRelr(1);
+}
+
+template <typename ELFT>
 void
 RewriteInstance::patchELFAllocatableRelaSections(ELFObjectFile<ELFT> *File) {
   using Elf_Rela = typename ELFT::Rela;
@@ -5275,8 +5431,7 @@ RewriteInstance::patchELFAllocatableRelaSections(ELFObjectFile<ELFT> *File) {
         NewRelA.r_offset = RelOffset;
         NewRelA.r_addend = Addend;
 
-        const bool IsJmpRel =
-            !!(IsJmpRelocation.find(Rel.Type) != IsJmpRelocation.end());
+        const bool IsJmpRel = IsJmpRelocation.contains(Rel.Type);
         uint64_t &Offset = IsJmpRel ? RelPltOffset : RelDynOffset;
         const uint64_t &EndOffset =
             IsJmpRel ? RelPltEndOffset : RelDynEndOffset;
@@ -5295,8 +5450,11 @@ RewriteInstance::patchELFAllocatableRelaSections(ELFObjectFile<ELFT> *File) {
     }
   };
 
-  // The dynamic linker expects R_*_RELATIVE relocations to be emitted first
-  writeRelocations(/* PatchRelative */ true);
+  // Place R_*_RELATIVE relocations in RELA section if RELR is not presented.
+  // The dynamic linker expects all R_*_RELATIVE relocations in RELA
+  // to be emitted first.
+  if (!DynamicRelrAddress)
+    writeRelocations(/* PatchRelative */ true);
   writeRelocations(/* PatchRelative */ false);
 
   auto fillNone = [&](uint64_t &Offset, uint64_t EndOffset) {
@@ -5502,6 +5660,15 @@ Error RewriteInstance::readELFDynamic(ELFObjectFile<ELFT> *File) {
     case ELF::DT_RELACOUNT:
       DynamicRelativeRelocationsCount = Dyn.getVal();
       break;
+    case ELF::DT_RELR:
+      DynamicRelrAddress = Dyn.getPtr();
+      break;
+    case ELF::DT_RELRSZ:
+      DynamicRelrSize = Dyn.getVal();
+      break;
+    case ELF::DT_RELRENT:
+      DynamicRelrEntrySize = Dyn.getVal();
+      break;
     }
   }
 
@@ -5514,6 +5681,20 @@ Error RewriteInstance::readELFDynamic(ELFObjectFile<ELFT> *File) {
     PLTRelocationsAddress.reset();
     PLTRelocationsSize = 0;
   }
+
+  if (!DynamicRelrAddress || !DynamicRelrSize) {
+    DynamicRelrAddress.reset();
+    DynamicRelrSize = 0;
+  } else if (!DynamicRelrEntrySize) {
+    errs() << "BOLT-ERROR: expected DT_RELRENT to be presented "
+           << "in DYNAMIC section\n";
+    exit(1);
+  } else if (DynamicRelrSize % DynamicRelrEntrySize) {
+    errs() << "BOLT-ERROR: expected RELR table size to be divisible "
+           << "by RELR entry size\n";
+    exit(1);
+  }
+
   return Error::success();
 }
 
@@ -5725,6 +5906,7 @@ void RewriteInstance::rewriteFile() {
 
   if (BC->HasRelocations) {
     patchELFAllocatableRelaSections();
+    patchELFAllocatableRelrSection();
     patchELFGOT();
   }
 

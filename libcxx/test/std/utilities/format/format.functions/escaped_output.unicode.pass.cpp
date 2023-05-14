@@ -11,9 +11,14 @@
 // This version runs the test when the platform has Unicode support.
 // UNSUPPORTED: libcpp-has-no-unicode
 
-// TODO FMT Investigate Windows and AIX issues.
-// UNSUPPORTED: msvc, target={{.+}}-windows-gnu
-// UNSUPPORTED: LIBCXX-AIX-FIXME
+// TODO FMT Investigate Windows and 32-bit AIX issues.
+// UNSUPPORTED: msvc, target={{.+}}-windows-gnu, target=powerpc-ibm-aix{{.*}}
+
+// TODO FMT Fix this test using GCC, it currently crashes.
+// UNSUPPORTED: gcc-12
+
+// TODO FMT This test should not require std::to_chars(floating-point)
+// XFAIL: availability-fp_to_chars-missing
 
 // <format>
 
@@ -97,12 +102,12 @@ auto test_formatted_size =
     []<class CharT, class... Args>(
         std::basic_string_view<CharT> expected, test_format_string<CharT, Args...> fmt, Args&&... args) {
       {
-        size_t size = std::formatted_size(fmt, std::forward<Args>(args)...);
+        std::size_t size = std::formatted_size(fmt, std::forward<Args>(args)...);
         assert(size == expected.size());
       }
 #ifndef TEST_HAS_NO_LOCALIZATION
       {
-        size_t size = std::formatted_size(std::locale(), fmt, std::forward<Args>(args)...);
+        std::size_t size = std::formatted_size(std::locale(), fmt, std::forward<Args>(args)...);
         assert(size == expected.size());
       }
 #endif // TEST_HAS_NO_LOCALIZATION
@@ -112,37 +117,37 @@ auto test_format_to_n =
     []<class CharT, class... Args>(
         std::basic_string_view<CharT> expected, test_format_string<CharT, Args...> fmt, Args&&... args) {
       {
-        size_t n = expected.size();
+        std::size_t n = expected.size();
         std::basic_string<CharT> out(n, CharT(' '));
         std::format_to_n_result result = std::format_to_n(out.begin(), n, fmt, std::forward<Args>(args)...);
-        assert(result.size == static_cast<ptrdiff_t>(expected.size()));
+        assert(result.size == static_cast<std::ptrdiff_t>(expected.size()));
         assert(result.out == out.end());
         assert(out == expected);
       }
 #ifndef TEST_HAS_NO_LOCALIZATION
       {
-        size_t n = expected.size();
+        std::size_t n = expected.size();
         std::basic_string<CharT> out(n, CharT(' '));
         std::format_to_n_result result =
             std::format_to_n(out.begin(), n, std::locale(), fmt, std::forward<Args>(args)...);
-        assert(result.size == static_cast<ptrdiff_t>(expected.size()));
+        assert(result.size == static_cast<std::ptrdiff_t>(expected.size()));
         assert(result.out == out.end());
         assert(out == expected);
       }
 #endif // TEST_HAS_NO_LOCALIZATION
       {
-        ptrdiff_t n = 0;
+        std::ptrdiff_t n = 0;
         std::basic_string<CharT> out;
         std::format_to_n_result result = std::format_to_n(out.begin(), n, fmt, std::forward<Args>(args)...);
-        assert(result.size == static_cast<ptrdiff_t>(expected.size()));
+        assert(result.size == static_cast<std::ptrdiff_t>(expected.size()));
         assert(result.out == out.end());
         assert(out.empty());
       }
       {
-        ptrdiff_t n = expected.size() / 2;
+        std::ptrdiff_t n = expected.size() / 2;
         std::basic_string<CharT> out(n, CharT(' '));
         std::format_to_n_result result = std::format_to_n(out.begin(), n, fmt, std::forward<Args>(args)...);
-        assert(result.size == static_cast<ptrdiff_t>(expected.size()));
+        assert(result.size == static_cast<std::ptrdiff_t>(expected.size()));
         assert(result.out == out.end());
         assert(out == expected.substr(0, n));
       }

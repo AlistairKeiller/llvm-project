@@ -14,6 +14,10 @@
 #include "lldb/API/SBDebugger.h"
 #include "lldb/API/SBDefines.h"
 
+namespace lldb_private {
+class CommandPluginInterfaceImplementation;
+}
+
 namespace lldb {
 
 class SBCommandInterpreter {
@@ -241,7 +245,20 @@ public:
                                        lldb::SBStringList &matches,
                                        lldb::SBStringList &descriptions);
 
+  /// Returns whether an interrupt flag was raised either by the SBDebugger - 
+  /// when the function is not running on the RunCommandInterpreter thread, or
+  /// by SBCommandInterpreter::InterruptCommand if it is.  If your code is doing
+  /// interruptible work, check this API periodically, and interrupt if it 
+  /// returns true.
   bool WasInterrupted() const;
+  
+  /// Interrupts the command currently executing in the RunCommandInterpreter
+  /// thread.
+  ///
+  /// \return
+  ///   \b true if there was a command in progress to recieve the interrupt.
+  ///   \b false if there's no command currently in flight.
+  bool InterruptCommand();
 
   // Catch commands before they execute by registering a callback that will get
   // called when the command gets executed. This allows GUI or command line
@@ -250,9 +267,6 @@ public:
   bool SetCommandOverrideCallback(const char *command_name,
                                   lldb::CommandOverrideCallback callback,
                                   void *baton);
-  SBCommandInterpreter(
-      lldb_private::CommandInterpreter *interpreter_ptr =
-          nullptr); // Access using SBDebugger::GetCommandInterpreter();
 #endif
 
   /// Return true if the command interpreter is the active IO handler.
@@ -301,6 +315,11 @@ public:
   void ResolveCommand(const char *command_line, SBCommandReturnObject &result);
 
 protected:
+  friend class lldb_private::CommandPluginInterfaceImplementation;
+
+  SBCommandInterpreter(
+      lldb_private::CommandInterpreter *interpreter_ptr =
+          nullptr); // Access using SBDebugger::GetCommandInterpreter();
   lldb_private::CommandInterpreter &ref();
 
   lldb_private::CommandInterpreter *get();

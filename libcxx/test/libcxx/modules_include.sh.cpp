@@ -10,9 +10,6 @@
 // This is important notably because the LLDB data formatters use
 // libc++ headers with modules enabled.
 
-// The system-provided <uchar.h> seems to be broken on AIX
-// XFAIL: LIBCXX-AIX-FIXME
-
 // GCC doesn't support -fcxx-modules
 // UNSUPPORTED: gcc
 
@@ -22,11 +19,6 @@
 
 // The Android headers don't appear to be compatible with modules yet
 // XFAIL: LIBCXX-ANDROID-FIXME
-
-// Prevent <ext/hash_map> from generating deprecated warnings for this test.
-#if defined(__DEPRECATED)
-#    undef __DEPRECATED
-#endif
 
 #include <__config>
 
@@ -871,18 +863,8 @@ END-SCRIPT
 #if defined(TEST_137) && __cplusplus >= 201103L
 #include <experimental/vector>
 #endif
-// RUN: echo '%{cxx} %s %{flags} %{compile_flags} -fmodules -fcxx-modules -fmodules-cache-path=%t -fsyntax-only -DTEST_138 &' >> %t.sh
-// RUN: echo 'TEST_138=$!' >> %t.sh
 // RUN: echo "wait $TEST_122" >> %t.sh
-#if defined(TEST_138)
-#include <ext/hash_map>
-#endif
-// RUN: echo '%{cxx} %s %{flags} %{compile_flags} -fmodules -fcxx-modules -fmodules-cache-path=%t -fsyntax-only -DTEST_139 &' >> %t.sh
-// RUN: echo 'TEST_139=$!' >> %t.sh
 // RUN: echo "wait $TEST_123" >> %t.sh
-#if defined(TEST_139)
-#include <ext/hash_set>
-#endif
 // RUN: echo "wait $TEST_124" >> %t.sh
 // RUN: echo "wait $TEST_125" >> %t.sh
 // RUN: echo "wait $TEST_126" >> %t.sh
@@ -897,7 +879,5 @@ END-SCRIPT
 // RUN: echo "wait $TEST_135" >> %t.sh
 // RUN: echo "wait $TEST_136" >> %t.sh
 // RUN: echo "wait $TEST_137" >> %t.sh
-// RUN: echo "wait $TEST_138" >> %t.sh
-// RUN: echo "wait $TEST_139" >> %t.sh
 // RUN: bash %t.sh
 // GENERATED-MARKER

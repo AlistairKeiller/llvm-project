@@ -3,7 +3,7 @@
 // RUN: %clang_cc1 -std=c++14 -fcxx-exceptions -fsized-deallocation -verify %s
 // RUN: %clang_cc1 -std=c++17 -fcxx-exceptions -fsized-deallocation -verify %s
 // RUN: %clang_cc1 -std=c++20 -fcxx-exceptions -fsized-deallocation -verify %s
-// RUN: %clang_cc1 -std=c++2b -fcxx-exceptions -fsized-deallocation -verify %s
+// RUN: %clang_cc1 -std=c++23 -fcxx-exceptions -fsized-deallocation -verify %s
 //
 // RUN: %clang_cc1 -std=c++17 -fcxx-exceptions -fsized-deallocation -frelaxed-template-template-args -DRELAXED_TEMPLATE_TEMPLATE_ARGS=1 -verify %s
 // RUN: %clang_cc1 -std=c++17 -fcxx-exceptions -fsized-deallocation -DCONCEPTS_TS=1 -verify %s
@@ -28,7 +28,7 @@
 #define check(macro, cxx98, cxx11, cxx14, cxx17, cxx20, cxx23) (cxx23 == 0 ? defined(__cpp_##macro) : __cpp_##macro != cxx23)
 #endif
 
-// --- C++2b features ---
+// --- C++23 features ---
 
 #if check(implicit_move, 0, 0, 0, 0, 0, 202011)
 #error "wrong value for __cpp_implicit_move"
@@ -355,10 +355,4 @@
 
 #if defined(NO_EXCEPTIONS) ? check(exceptions, 0, 0, 0, 0, 0, 0) : check(exceptions, 199711, 199711, 199711, 199711, 199711, 199711)
 #error "wrong value for __cpp_exceptions"
-#endif
-
-// --- TS features --
-
-#if check(coroutines, 0, 0, 0, 0, 201703, 201703)
-#error "wrong value for __cpp_coroutines"
 #endif
